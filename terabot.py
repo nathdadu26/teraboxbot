@@ -11,6 +11,10 @@ from typing import Optional, Dict, Any, List, Tuple
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler, Defaults
 from telegram.constants import ParseMode
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Logging
 logging.basicConfig(
@@ -24,29 +28,35 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 
-# Config
-BOT_TOKEN = "8178135969:AAE_JZI6HfvMfzNv2WlplH0oVW4JT5793Sc"
-TERABOX_API = "https://silent-noor-stream-api.woodmirror.workers.dev/api"
-HYDRAX_UPLOAD_API = "http://up.hydrax.net/1c7beabe036322d38c466f7c3dca9818"
+# Config from environment variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+TERABOX_API = os.getenv("TERABOX_API", "")
+HYDRAX_UPLOAD_API = os.getenv("HYDRAX_UPLOAD_API", "")
 
 # Channels
-TELEGRAM_CHANNEL_ID = -1003439015998    # File upload channel (downloaded file)
-RESULT_CHANNEL_ID = -1003334665940      # User media copy channel
+TELEGRAM_CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", ""))
+RESULT_CHANNEL_ID = int(os.getenv("RESULT_CHANNEL_ID", ""))
 
-ARIA2_RPC_URL = "http://localhost:6800/jsonrpc"
-ARIA2_SECRET = "mysecret"
-DOWNLOAD_DIR = "/tmp/aria2_downloads"
+# Aria2 Configuration
+ARIA2_RPC_URL = os.getenv("ARIA2_RPC_URL", "http://localhost:6800/jsonrpc")
+ARIA2_SECRET = os.getenv("ARIA2_SECRET", "mysecret")
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/aria2_downloads")
 
+# Terabox domains
 TERABOX_DOMAINS = [
     "terabox.com", "1024terabox.com", "teraboxapp.com", "teraboxlink.com",
     "terasharelink.com", "terafileshare.com", "1024tera.com", "1024tera.cn",
     "teraboxdrive.com", "dubox.com"
 ]
 
-DB_PATH = "files.db"
+DB_PATH = os.getenv("DB_PATH", "files.db")
 
-# API timeout increased for better response handling
-API_TIMEOUT = 30  # 30 seconds timeout for API calls
+# API timeout
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
+
+# Validate required environment variables
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is required!")
 
 # --- Database setup ---
 def init_db():
@@ -548,6 +558,8 @@ def main():
     ))
 
     logger.info("Bot started with pipeline processing enabled")
+    logger.info(f"Telegram Channel ID: {TELEGRAM_CHANNEL_ID}")
+    logger.info(f"Result Channel ID: {RESULT_CHANNEL_ID}")
     app.run_polling()
 
 if __name__ == "__main__":
