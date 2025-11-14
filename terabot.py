@@ -12,6 +12,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler, Defaults
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
+from aiohttp import web
 
 # Load environment variables from .env file
 load_dotenv()
@@ -36,6 +37,10 @@ HYDRAX_UPLOAD_API = os.getenv("HYDRAX_UPLOAD_API", "")
 # Channels
 TELEGRAM_CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", ""))
 RESULT_CHANNEL_ID = int(os.getenv("RESULT_CHANNEL_ID", ""))
+
+# Webhook Configuration for Koyeb
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Your Koyeb app URL
+PORT = int(os.getenv("PORT", "8000"))  # Koyeb automatically sets PORT
 
 # Aria2 Configuration
 ARIA2_RPC_URL = os.getenv("ARIA2_RPC_URL", "http://localhost:6800/jsonrpc")
@@ -242,7 +247,7 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
     try:
         # Update status
         await status_msg.edit_text(
-            f"🔄 Processing link {link_number}/{total_links}...\n"
+            f"📄 Processing link {link_number}/{total_links}...\n"
             f"⏳ Waiting for Terabox API response...",
             parse_mode=ParseMode.HTML
         )
@@ -269,7 +274,7 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
 
         # Update status
         await status_msg.edit_text(
-            f"🔄 Processing link {link_number}/{total_links}...\n"
+            f"📄 Processing link {link_number}/{total_links}...\n"
             f"📦 File: {file_name}\n"
             f"⏳ Checking file size...",
             parse_mode=ParseMode.HTML
@@ -298,7 +303,7 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
 
         # Update status
         await status_msg.edit_text(
-            f"🔄 Processing link {link_number}/{total_links}...\n"
+            f"📄 Processing link {link_number}/{total_links}...\n"
             f"📦 File: {file_name}\n"
             f"⬇️ Starting download...",
             parse_mode=ParseMode.HTML
@@ -327,7 +332,7 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
         
         # Update status
         await status_msg.edit_text(
-            f"🔄 Processing link {link_number}/{total_links}...\n"
+            f"📄 Processing link {link_number}/{total_links}...\n"
             f"📦 File: {file_name}\n"
             f"⬇️ Downloading...",
             parse_mode=ParseMode.HTML
@@ -346,7 +351,7 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
 
         # Update status
         await status_msg.edit_text(
-            f"🔄 Processing link {link_number}/{total_links}...\n"
+            f"📄 Processing link {link_number}/{total_links}...\n"
             f"📦 File: {file_name}\n"
             f"⬆️ Uploading to Hydrax...",
             parse_mode=ParseMode.HTML
@@ -368,7 +373,7 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
 
         # Update status
         await status_msg.edit_text(
-            f"🔄 Processing link {link_number}/{total_links}...\n"
+            f"📄 Processing link {link_number}/{total_links}...\n"
             f"📦 File: {file_name}\n"
             f"📤 Sending to channel...",
             parse_mode=ParseMode.HTML
@@ -431,7 +436,7 @@ async def process_links_pipeline(urls: List[str], context: ContextTypes.DEFAULT_
 
     # Create initial status message
     status_msg = await m.reply_text(
-        f"🔄 Starting pipeline processing...\n"
+        f"📄 Starting pipeline processing...\n"
         f"📊 Total links: {total_links}",
         parse_mode=ParseMode.HTML
     )
@@ -538,10 +543,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       "Send media with Terabox links in caption.\n"
                       "Multiple links will be processed one by one.")
 
-def main():
-    init_db()
+# Health check endpoint for Koyeb
+async def health_check(request):
+    return web.Response(text="OK", status=200)
 
-    app = (
+async def webhook_handler(request):
+    """Handle incoming webhook updates from Telegram"""
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return web.Response(status=500)
+
+# Global application instance
+application = None
+
+async def start_webhook_server():
+    """Start the webhook server for Koyeb"""
+    global application
+    
+    # Initialize database
+    init_db()
+    
+    # Create application
+    application = (
         Application.builder()
         .token(BOT_TOKEN)
         .defaults(Defaults(parse_mode=ParseMode.HTML))
@@ -551,16 +579,76 @@ def main():
     async def handle_media_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.application.create_task(handle_media_with_links(update, context))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(
         filters.PHOTO | filters.VIDEO | filters.Document.ALL,
         handle_media_wrapper
     ))
 
-    logger.info("Bot started with pipeline processing enabled")
+    # Initialize the application
+    await application.initialize()
+    await application.start()
+
+    # Set webhook
+    if WEBHOOK_URL:
+        webhook_path = f"/webhook/{BOT_TOKEN}"
+        full_webhook_url = f"{WEBHOOK_URL}{webhook_path}"
+        await application.bot.set_webhook(url=full_webhook_url)
+        logger.info(f"Webhook set to: {full_webhook_url}")
+    else:
+        logger.warning("WEBHOOK_URL not set! Bot will not receive updates.")
+
+    # Create web application
+    app = web.Application()
+    app.router.add_get("/health", health_check)
+    app.router.add_get("/", health_check)  # Root path health check
+    app.router.add_post(f"/webhook/{BOT_TOKEN}", webhook_handler)
+
+    # Start web server
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    logger.info(f"Bot started in webhook mode on port {PORT}")
     logger.info(f"Telegram Channel ID: {TELEGRAM_CHANNEL_ID}")
     logger.info(f"Result Channel ID: {RESULT_CHANNEL_ID}")
-    app.run_polling()
+    logger.info(f"Health check endpoint: http://0.0.0.0:{PORT}/health")
+
+    # Keep the server running
+    await asyncio.Event().wait()
+
+def main():
+    """Main entry point"""
+    # Check if running in Koyeb (has WEBHOOK_URL or PORT env var)
+    if WEBHOOK_URL or os.getenv("PORT"):
+        logger.info("Starting in WEBHOOK mode for Koyeb")
+        asyncio.run(start_webhook_server())
+    else:
+        # Fallback to polling mode for local development
+        logger.info("Starting in POLLING mode (local development)")
+        init_db()
+        
+        app = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .defaults(Defaults(parse_mode=ParseMode.HTML))
+            .build()
+        )
+
+        async def handle_media_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            context.application.create_task(handle_media_with_links(update, context))
+
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(MessageHandler(
+            filters.PHOTO | filters.VIDEO | filters.Document.ALL,
+            handle_media_wrapper
+        ))
+
+        logger.info("Bot started with pipeline processing enabled")
+        logger.info(f"Telegram Channel ID: {TELEGRAM_CHANNEL_ID}")
+        logger.info(f"Result Channel ID: {RESULT_CHANNEL_ID}")
+        app.run_polling()
 
 if __name__ == "__main__":
     main()
