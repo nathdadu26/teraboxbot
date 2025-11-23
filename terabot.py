@@ -32,7 +32,10 @@ logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 # Config from environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TERABOX_API = os.getenv("TERABOX_API", "")
-HYDRAX_UPLOAD_API = os.getenv("HYDRAX_UPLOAD_API", "")
+
+# Bunny Stream Configuration
+BUNNY_LIBRARY = os.getenv("BUNNY_LIBRARY")
+BUNNY_API_KEY = os.getenv("BUNNY_API_KEY")
 
 # Channels
 TELEGRAM_CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", ""))
@@ -141,7 +144,7 @@ class Aria2Client:
             await asyncio.sleep(2)
 
 # ---------------- Bot Logic ----------------
-class TeraboxHydraxBot:
+class TeraboxBunnyBot:
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
         self.aria2 = Aria2Client(ARIA2_RPC_URL, ARIA2_SECRET)
@@ -199,34 +202,69 @@ class TeraboxHydraxBot:
         
         return {"success": False, "error": "Unknown error after retries"}
 
-    async def upload_file_to_hydrax(self, file_path: str):
+    async def upload_to_bunny(self, file_path: str, file_name: str):
+        """Upload file to Bunny Stream"""
         await self.init_session()
-        logger.info(f"📤 Starting Hydrax upload for: {os.path.basename(file_path)}")
+        logger.info(f"📤 Starting Bunny Stream upload for: {file_name}")
         
-        with open(file_path, "rb") as f:
-            form = aiohttp.FormData()
-            form.add_field("file", f, filename=os.path.basename(file_path))
-            async with self.session.post(HYDRAX_UPLOAD_API, data=form) as r:
+        create_url = f"https://video.bunnycdn.com/library/{BUNNY_LIBRARY}/videos"
+        
+        try:
+            # Create video entry
+            async with self.session.post(
+                create_url,
+                headers={"AccessKey": BUNNY_API_KEY},
+                json={"title": file_name}
+            ) as r:
                 data = await r.json()
                 
-                # Log full Hydrax response
-                logger.info(f"=== HYDRAX API RESPONSE ===")
+                logger.info(f"=== BUNNY CREATE VIDEO RESPONSE ===")
                 logger.info(f"Status Code: {r.status}")
                 logger.info(f"Full Response: {data}")
                 logger.info("=" * 50)
                 
-                if data.get("status"):
-                    logger.info(f"✅ Hydrax upload success")
-                    logger.info(f"URL Iframe: {data.get('urlIframe', 'N/A')}")
-                    logger.info(f"Slug: {data.get('slug', 'N/A')}")
-                    return {"success": True, "data": data}
-                else:
-                    logger.error(f"❌ Hydrax upload failed")
-                    logger.error(f"Message: {data.get('msg', 'Unknown error')}")
-                    return {"success": False, "error": data.get("msg")}
+                if "guid" not in data:
+                    logger.error(f"❌ Bunny video creation failed")
+                    return {"success": False, "error": "Failed to create video entry"}
+                
+                video_id = data["guid"]
+                logger.info(f"✅ Video entry created with ID: {video_id}")
+            
+            # Upload video file
+            upload_url = f"https://video.bunnycdn.com/library/{BUNNY_LIBRARY}/videos/{video_id}"
+            
+            with open(file_path, "rb") as f:
+                async with self.session.put(
+                    upload_url,
+                    data=f,
+                    headers={"AccessKey": BUNNY_API_KEY, "Content-Type": "video/mp4"}
+                ) as r:
+                    logger.info(f"=== BUNNY UPLOAD RESPONSE ===")
+                    logger.info(f"Status Code: {r.status}")
+                    logger.info("=" * 50)
+                    
+                    if r.status in [200, 201]:
+                        embed_url = f"https://iframe.mediadelivery.net/embed/{BUNNY_LIBRARY}/{video_id}"
+                        logger.info(f"✅ Bunny upload success")
+                        logger.info(f"Video ID: {video_id}")
+                        logger.info(f"Embed URL: {embed_url}")
+                        return {
+                            "success": True, 
+                            "data": {
+                                "video_id": video_id,
+                                "embed_url": embed_url
+                            }
+                        }
+                    else:
+                        logger.error(f"❌ Bunny upload failed with status {r.status}")
+                        return {"success": False, "error": f"Upload failed with status {r.status}"}
+        
+        except Exception as e:
+            logger.error(f"❌ Bunny upload error: {str(e)}")
+            return {"success": False, "error": str(e)}
 
 # ---------------- Handlers ----------------
-bot_instance = TeraboxHydraxBot()
+bot_instance = TeraboxBunnyBot()
 
 async def schedule_delete(msg, user_msg, delay=1200):
     await asyncio.sleep(delay)
@@ -353,12 +391,12 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
         await status_msg.edit_text(
             f"📄 Processing link {link_number}/{total_links}...\n"
             f"📦 File: {file_name}\n"
-            f"⬆️ Uploading to Hydrax...",
+            f"⬆️ Uploading to Bunny Stream...",
             parse_mode=ParseMode.HTML
         )
 
-        # Step 3: Upload to Hydrax
-        up = await bot_instance.upload_file_to_hydrax(fpath)
+        # Step 3: Upload to Bunny Stream
+        up = await bot_instance.upload_to_bunny(fpath, file_name)
         if not up["success"]:
             error_msg = f"❌ Link {link_number}/{total_links}: Upload failed for <b>{file_name}</b>\n{up['error']}"
             logger.error(error_msg)
@@ -368,8 +406,8 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
                 pass
             return False, None, error_msg
 
-        urlIframe = up["data"].get("urlIframe")
-        slug = up["data"].get("slug")
+        video_id = up["data"].get("video_id")
+        embed_url = up["data"].get("embed_url")
 
         # Update status
         await status_msg.edit_text(
@@ -383,8 +421,8 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
         caption_file = (
             f"File Name : {file_name}\n"
             f"File Size : {file_size_str}\n"
-            f"URLIframe : {urlIframe}\n"
-            f"Slug : {slug}"
+            f"Video ID : {video_id}\n"
+            f"Embed URL : {embed_url}"
         )
         try:
             mime_type, _ = mimetypes.guess_type(fpath)
@@ -401,8 +439,8 @@ async def process_single_link(url: str, link_number: int, total_links: int, cont
         # Prepare result caption
         result_caption = (
             f"✅ {file_name} ({file_size_str})\n"
-            f"🔗 {urlIframe}\n"
-            f"🏷️ {slug}"
+            f"🎬 {embed_url}\n"
+            f"🆔 {video_id}"
         )
 
         # Cleanup
@@ -539,7 +577,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = update.effective_message
     if not m:
         return
-    await m.reply_text("✅ Bot is running with pipeline processing!\n\n"
+    await m.reply_text("✅ Bot is running with Bunny Stream upload!\n\n"
                       "Send media with Terabox links in caption.\n"
                       "Multiple links will be processed one by one.")
 
@@ -645,7 +683,7 @@ def main():
             handle_media_wrapper
         ))
 
-        logger.info("Bot started with pipeline processing enabled")
+        logger.info("Bot started with Bunny Stream upload enabled")
         logger.info(f"Telegram Channel ID: {TELEGRAM_CHANNEL_ID}")
         logger.info(f"Result Channel ID: {RESULT_CHANNEL_ID}")
         app.run_polling()
